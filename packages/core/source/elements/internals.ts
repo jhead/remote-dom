@@ -8,6 +8,8 @@ import type {RemoteConnection, RemoteNodeSerialization} from '../types.ts';
 
 export const REMOTE_CONNECTIONS = new WeakMap<Node, RemoteConnection>();
 
+const GLOBAL_EVENT_LISTENERS = new WeakMap<Node, Record<string, (...args: any) => void>>();
+
 /**
  * Gets the `RemoteConnection` instance that a node is connected to. If the node
  * is not connected to a remote root, this method returns `undefined`.
@@ -88,6 +90,62 @@ export const REMOTE_EVENT_LISTENERS = new WeakMap<
  */
 export function remoteEventListeners(node: Node) {
   return REMOTE_EVENT_LISTENERS.get(node);
+}
+
+/**
+ * Creates a proxy event listener that maintains proper context and can be called
+ * from the host side. This works by creating a dispatch function that triggers
+ * an event on the remote element, which then calls the original listener.
+ */
+export function createProxyEventListener(
+  node: Element,
+  type: string,
+  originalListener: (...args: any[]) => any
+): (...args: any[]) => any {
+  return function dispatch(...args: any[]) {
+    // Create a custom event that will trigger the original event handlers
+    const event = new CustomEvent(type, {
+      detail: args,
+      bubbles: true,
+      cancelable: true
+    });
+    
+    // Dispatch the event on the remote element
+    // This will trigger all event handlers for this type, including the original one
+    node.dispatchEvent(event);
+    
+    // Return the event's result if it was set
+    return (event as any).result;
+  };
+}
+
+/**
+ * Sets up event proxying for an element. This creates proxy listeners that will
+ * be sent to the host and trigger events on the remote element when called.
+ */
+export function setupEventProxying(node: Element) {
+  // Only set up once per element
+  if ((node as any)._eventProxyingSetUp) return;
+  (node as any)._eventProxyingSetUp = true;
+  
+  // Get the global listeners for this element
+  const globalListeners = GLOBAL_EVENT_LISTENERS.get(node) ?? {};
+  
+  // For each event type that has a listener, create a proxy
+  for (const [type, listener] of Object.entries(globalListeners)) {
+    if (typeof listener === 'function') {
+      // Create a proxy listener that will be sent to the host
+      const proxyListener = createProxyEventListener(node, type, listener);
+      
+      // Store the proxy listener in the remote event listeners map
+      let eventListeners = REMOTE_EVENT_LISTENERS.get(node);
+      if (!eventListeners) {
+        eventListeners = {};
+        REMOTE_EVENT_LISTENERS.set(node, eventListeners);
+      }
+      eventListeners[type] = proxyListener;
+    }
+  }
 }
 
 /**
@@ -252,6 +310,9 @@ export function serializeRemoteNode(node: Node): RemoteNodeSerialization {
   switch (nodeType) {
     // Element
     case 1: {
+      // Set up event proxying for elements before serializing
+      setupEventProxying(node as Element);
+      
       return {
         id: remoteId(node),
         type: nodeType,
@@ -305,3 +366,73 @@ export function callRemoteElementMethod(
 
   return connection.call(id, method, ...args);
 }
+
+// Monkey patch
+(function () {
+  // Map each element → eventType → handler function
+  type ListenerMap = Record<string, (...args: any) => void>;
+
+  // Use the existing GLOBAL_EVENT_LISTENERS WeakMap<Node, ListenerMap>
+  const registry: WeakMap<Node, ListenerMap> = GLOBAL_EVENT_LISTENERS;
+
+  // Keep originals
+  const origAdd = EventTarget.prototype.addEventListener;
+  const origRem = EventTarget.prototype.removeEventListener;
+
+  // Helper to get (or init) the per-element map
+  function getElemMap(elem: Node): ListenerMap {
+    let m = registry.get(elem);
+    if (!m) {
+      m = {};
+      registry.set(elem, m);
+    }
+    return m;
+  }
+
+  // Monkey-patch addEventListener
+  EventTarget.prototype.addEventListener = function (
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | AddEventListenerOptions
+  ) {
+    // Only track for Node instances and function listeners
+    if (this instanceof Node && typeof listener === 'function') {
+      const elemMap = getElemMap(this);
+      elemMap[type] = listener;
+    }
+    // Call the real one
+    return origAdd.call(this, type, listener, options);
+  };
+
+  // Monkey-patch removeEventListener
+  EventTarget.prototype.removeEventListener = function (
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | EventListenerOptions
+  ) {
+    // Only track for Node instances and function listeners
+    if (this instanceof Node && typeof listener === 'function') {
+      const elemMap = registry.get(this);
+      if (elemMap && elemMap[type] === listener) {
+        delete elemMap[type];
+      }
+    }
+    return origRem.call(this, type, listener, options);
+  };
+
+  // Expose a helper to read it
+  (window as any).getRegisteredListeners = function (elem: Node) {
+    const elemMap = registry.get(elem);
+    if (!elemMap) return {};
+    // Convert to plain object for easier logging
+    const result: Record<string, (...args: any) => void> = {};
+    for (const type in elemMap) {
+      if (Object.prototype.hasOwnProperty.call(elemMap, type)) {
+        if (typeof elemMap[type] === 'function') {
+          result[type] = elemMap[type] as (...args: any) => void;
+        }
+      }
+    }
+    return result;
+  };
+})();
