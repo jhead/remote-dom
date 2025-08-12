@@ -8,7 +8,8 @@ import type {RemoteConnection, RemoteNodeSerialization} from '../types.ts';
 
 export const REMOTE_CONNECTIONS = new WeakMap<Node, RemoteConnection>();
 
-const GLOBAL_EVENT_LISTENERS = new WeakMap<Node, Record<string, (...args: any) => void>>();
+// Map of element → set of event types
+const AUTO_REGISTERED_EVENT_LISTENERS = new WeakMap<Node, Set<string>>();
 
 /**
  * Gets the `RemoteConnection` instance that a node is connected to. If the node
@@ -19,6 +20,8 @@ export function remoteConnection(node: Node) {
 }
 
 export const REMOTE_IDS = new WeakMap<Node, string>();
+const REMOTE_NODES_BY_ID = new Map<string, Node>();
+
 let id = 0;
 
 /**
@@ -37,6 +40,7 @@ export function remoteId(node: Node) {
 
 export function setRemoteId(node: Node, id: string) {
   REMOTE_IDS.set(node, id);
+  REMOTE_NODES_BY_ID.set(id, node);
 }
 
 export const REMOTE_PROPERTIES = new WeakMap<Node, Record<string, any>>();
@@ -97,23 +101,23 @@ export function remoteEventListeners(node: Node) {
  * from the host side. This works by creating a dispatch function that triggers
  * an event on the remote element, which then calls the original listener.
  */
-export function createProxyEventListener(
-  node: Element,
-  type: string,
-  originalListener: (...args: any[]) => any
-): (...args: any[]) => any {
-  return function dispatch(...args: any[]) {
+export function createProxyEventListener(type: string): (...args: any[]) => any {
+  return function dispatch(targetNodeId: string,...args: any[]) {
     // Create a custom event that will trigger the original event handlers
     const event = new CustomEvent(type, {
       detail: args,
       bubbles: true,
       cancelable: true
     });
-    
-    // Dispatch the event on the remote element
-    // This will trigger all event handlers for this type, including the original one
-    node.dispatchEvent(event);
-    
+
+    // Use the event target from the original event and map it to the remote node
+    const targetNode = REMOTE_NODES_BY_ID.get(targetNodeId);
+    if (targetNode) {
+      // Dispatch the event on the remote element
+     // This will trigger all event handlers for this type, including the original one
+      targetNode.dispatchEvent(event);
+    }
+
     // Return the event's result if it was set
     return (event as any).result;
   };
@@ -129,22 +133,20 @@ export function setupEventProxying(node: Element) {
   (node as any)._eventProxyingSetUp = true;
   
   // Get the global listeners for this element
-  const globalListeners = GLOBAL_EVENT_LISTENERS.get(node) ?? {};
+  const globalListeners = AUTO_REGISTERED_EVENT_LISTENERS.get(node) ?? new Set<string>();
   
   // For each event type that has a listener, create a proxy
-  for (const [type, listener] of Object.entries(globalListeners)) {
-    if (typeof listener === 'function') {
-      // Create a proxy listener that will be sent to the host
-      const proxyListener = createProxyEventListener(node, type, listener);
-      
-      // Store the proxy listener in the remote event listeners map
-      let eventListeners = REMOTE_EVENT_LISTENERS.get(node);
-      if (!eventListeners) {
-        eventListeners = {};
-        REMOTE_EVENT_LISTENERS.set(node, eventListeners);
-      }
-      eventListeners[type] = proxyListener;
+  for (const type of globalListeners) {
+    // Create a proxy listener that will be sent to the host
+    const proxyListener = createProxyEventListener(type);
+    
+    // Store the proxy listener in the remote event listeners map
+    let eventListeners = REMOTE_EVENT_LISTENERS.get(node);
+    if (!eventListeners) {
+      eventListeners = {};
+      REMOTE_EVENT_LISTENERS.set(node, eventListeners);
     }
+    eventListeners[type] = proxyListener;
   }
 }
 
@@ -369,22 +371,16 @@ export function callRemoteElementMethod(
 
 // Monkey patch
 (function () {
-  // Map each element → eventType → handler function
-  type ListenerMap = Record<string, (...args: any) => void>;
-
-  // Use the existing GLOBAL_EVENT_LISTENERS WeakMap<Node, ListenerMap>
-  const registry: WeakMap<Node, ListenerMap> = GLOBAL_EVENT_LISTENERS;
-
   // Keep originals
   const origAdd = EventTarget.prototype.addEventListener;
   const origRem = EventTarget.prototype.removeEventListener;
 
   // Helper to get (or init) the per-element map
-  function getElemMap(elem: Node): ListenerMap {
-    let m = registry.get(elem);
+  function getEventTypesForElement(elem: Node): Set<string> {
+    let m = AUTO_REGISTERED_EVENT_LISTENERS.get(elem);
     if (!m) {
-      m = {};
-      registry.set(elem, m);
+      m = new Set();
+      AUTO_REGISTERED_EVENT_LISTENERS.set(elem, m);
     }
     return m;
   }
@@ -397,8 +393,8 @@ export function callRemoteElementMethod(
   ) {
     // Only track for Node instances and function listeners
     if (this instanceof Node && typeof listener === 'function') {
-      const elemMap = getElemMap(this);
-      elemMap[type] = listener;
+      const eventTypes = getEventTypesForElement(this);
+      eventTypes.add(type);
     }
     // Call the real one
     return origAdd.call(this, type, listener, options);
@@ -412,27 +408,11 @@ export function callRemoteElementMethod(
   ) {
     // Only track for Node instances and function listeners
     if (this instanceof Node && typeof listener === 'function') {
-      const elemMap = registry.get(this);
-      if (elemMap && elemMap[type] === listener) {
-        delete elemMap[type];
+      const eventTypes = AUTO_REGISTERED_EVENT_LISTENERS.get(this);
+      if (eventTypes && eventTypes.has(type)) {
+        eventTypes.delete(type);
       }
     }
     return origRem.call(this, type, listener, options);
-  };
-
-  // Expose a helper to read it
-  (window as any).getRegisteredListeners = function (elem: Node) {
-    const elemMap = registry.get(elem);
-    if (!elemMap) return {};
-    // Convert to plain object for easier logging
-    const result: Record<string, (...args: any) => void> = {};
-    for (const type in elemMap) {
-      if (Object.prototype.hasOwnProperty.call(elemMap, type)) {
-        if (typeof elemMap[type] === 'function') {
-          result[type] = elemMap[type] as (...args: any) => void;
-        }
-      }
-    }
-    return result;
   };
 })();

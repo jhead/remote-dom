@@ -8,11 +8,10 @@ import {
   UPDATE_PROPERTY_TYPE_ATTRIBUTE,
   UPDATE_PROPERTY_TYPE_EVENT_LISTENER,
 } from '../constants.ts';
-import {setRemoteId} from '../elements/internals.ts';
+import {REMOTE_IDS, setRemoteId} from '../elements/internals.ts';
 import type {RemoteNodeSerialization} from '../types.ts';
 import type {RemoteReceiverOptions} from './shared.ts';
 
-const REMOTE_IDS = new WeakMap<Node, string>();
 const REMOTE_PROPERTIES = new WeakMap<Node, Record<string, any>>();
 const REMOTE_EVENT_LISTENERS = new WeakMap<Node, Record<string, any>>();
 
@@ -322,13 +321,8 @@ function updateRemoteProperty(
         // to `event.resolve()`. A host implementation can use this conventional event shape
         // to use the internal function representation of the event listener.
         const handler = (event: any) => {
-          // If the event is bubbling/ capturing, we don’t trigger the listener here,
-          // we let the event be dispatched to the remote environment only from the actual
-          // target element. In the remote environment, the event will go through a separate
-          // capture/ bubbling phase, where it will invoke the remote event listener
-          // that corresponds to this `value` function.
-          if (event.target !== element) return;
-          const result = (value as any)(event.detail);
+          const targetNodeId = REMOTE_IDS.get(event.target);
+          const result = (value as any)(targetNodeId, event.detail);
           event.resolve?.(result);
         };
 
