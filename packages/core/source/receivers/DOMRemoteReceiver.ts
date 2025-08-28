@@ -162,7 +162,11 @@ export class DOMRemoteReceiver {
 
       switch (node.type) {
         case NODE_TYPE_ELEMENT: {
-          normalizedChild = document.createElement(node.element);
+          if (node.namespaceURI) {
+            normalizedChild = document.createElementNS(node.namespaceURI, node.element);
+          } else {
+            normalizedChild = document.createElement(node.element);
+          }
 
           if (node.properties) {
             REMOTE_PROPERTIES.set(normalizedChild, node.properties);

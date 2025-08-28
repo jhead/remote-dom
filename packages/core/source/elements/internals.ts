@@ -314,6 +314,8 @@ export function serializeRemoteNode(node: Node): RemoteNodeSerialization {
     case 1: {
       // Set up event proxying for elements before serializing
       setupEventProxying(node as Element);
+
+      const namespaceURI = (node as Element)?.namespaceURI ?? undefined;
       
       return {
         id: remoteId(node),
@@ -323,6 +325,7 @@ export function serializeRemoteNode(node: Node): RemoteNodeSerialization {
         attributes: cloneMaybeObject(remoteAttributes(node)),
         eventListeners: cloneMaybeObject(remoteEventListeners(node)),
         children: Array.from(node.childNodes).map(serializeRemoteNode),
+        namespaceURI,
       };
     }
     // TextNode

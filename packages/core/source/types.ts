@@ -177,6 +177,11 @@ export interface RemoteElementSerialization {
    * The list of child nodes of this element.
    */
   readonly children: readonly RemoteNodeSerialization[];
+
+  /**
+   * The namespace of the element. Provides support for non-HTML elements like SVG.
+   */
+  readonly namespaceURI?: string;
 }
 
 /**
